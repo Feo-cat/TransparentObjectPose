@@ -1,0 +1,16 @@
+/home/renchengwei/blender-4.4.3-linux-x64/blender -b -P depth_mask_fixed_obj.py -- \
+    --object_path glb_objs \
+    --plane_path glb_planes \
+    --output_dir ./views_depth_mask_fixed_obj \
+    --engine CYCLES \
+    --num_images 12 \
+    --camera_type continuous \
+    --camera_dist_min 16 \
+    --camera_dist_max 32 \
+    --elevation_min 10 \
+    --elevation_max 45 \
+    --enable_other_objects "${ENABLE_OTHER_OBJECTS:-0}" \
+    --res_w 640 \
+    --res_h 480 \
+    --hdrs_dir /home/renchengwei/bpy_render/hdri_bgs \
+    --silent_mode

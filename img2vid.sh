@@ -1,0 +1,1 @@
+ffmpeg -framerate 6 -i /mnt/afs/TransparentObjectPose/test_repo/%06d_pred.png -c:v libx264 -pix_fmt yuv420p output_vid.mp4

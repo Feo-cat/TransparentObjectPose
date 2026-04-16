@@ -1,0 +1,14 @@
+{
+	"9": [{"bbox_obj": [150, 158, 108, 67], "bbox_visib": [150, 158, 108, 67], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"2": [{"bbox_obj": [402, 178, 124, 94], "bbox_visib": [402, 178, 124, 94], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"10": [{"bbox_obj": [191, 123, 128, 85], "bbox_visib": [191, 123, 128, 85], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"4": [{"bbox_obj": [321, 223, 135, 107], "bbox_visib": [321, 223, 135, 107], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"6": [{"bbox_obj": [177, 195, 92, 82], "bbox_visib": [177, 195, 92, 82], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"8": [{"bbox_obj": [124, 174, 116, 78], "bbox_visib": [124, 174, 116, 78], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"11": [{"bbox_obj": [279, 101, 109, 94], "bbox_visib": [279, 101, 109, 94], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"5": [{"bbox_obj": [243, 222, 129, 118], "bbox_visib": [243, 222, 129, 118], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"0": [{"bbox_obj": [357, 158, 65, 64], "bbox_visib": [357, 158, 65, 64], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"3": [{"bbox_obj": [401, 193, 149, 94], "bbox_visib": [401, 193, 149, 94], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"1": [{"bbox_obj": [393, 149, 97, 90], "bbox_visib": [393, 149, 97, 90], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}],
+	"7": [{"bbox_obj": [85, 184, 147, 110], "bbox_visib": [85, 184, 147, 110], "px_count_all": 99999, "px_count_valid": 99999, "px_count_visib": 99999, "visib_fract": 1.0}]
+}

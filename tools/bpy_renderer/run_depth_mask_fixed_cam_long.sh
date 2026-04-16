@@ -1,0 +1,27 @@
+/home/renchengwei/blender-4.4.3-linux-x64/blender -b -P depth_mask_fixed_cam_long.py -- \
+    --object_path glb_objs \
+    --plane_path glb_planes \
+    --output_dir ./views_depth_mask_fixed_cam_long \
+    --engine CYCLES \
+    --mode full \
+    --num_images 240 \
+    --camera_type fixed \
+    --camera_dist_min 16 \
+    --camera_dist_max 32 \
+    --elevation_min 10 \
+    --elevation_max 45 \
+    --enable_other_objects "${ENABLE_OTHER_OBJECTS:-0}" \
+    --res_w 640 \
+    --res_h 480 \
+    --motion_segments_min 10 \
+    --motion_segments_max 24 \
+    --motion_segment_len_min 12 \
+    --motion_segment_len_max 18 \
+    --motion_collision_samples 7 \
+    --motion_pose_attempts 140 \
+    --motion_xy_step_scale_min 0.08 \
+    --motion_xy_step_scale_max 0.22 \
+    --motion_spin_deg_max 36 \
+    --motion_table_min_segment_dist_scale 0.08 \
+    --hdrs_dir /home/renchengwei/bpy_render/hdri_bgs \
+    --silent_mode

@@ -1,0 +1,1 @@
+GPU_IDS=0,1,2,3,4,5,6,7   NUM_IMAGES=256   OUTPUT_DIR=./views_tube_long_vid_multi_fixed_cam  bash run_depth_mask_fixed_cam_long_multi_gpu.sh
