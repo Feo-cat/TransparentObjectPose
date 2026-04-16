@@ -44,11 +44,11 @@ PROJECT_ROOT="$SCRIPT_DIR"
 # Project/model settings
 # -----------------------------
 CONFIG="$PROJECT_ROOT/configs/gdrn/labsim/a6_cPnP_lm13_ctx_prior.py"
-DEFAULT_WEIGHTS_NAME="${GDRN_WEIGHTS_NAME:-model_0081599.pth}"
+DEFAULT_WEIGHTS_NAME="${GDRN_WEIGHTS_NAME:-model_0027599.pth}"
 LOCAL_CKPT_DIR="${GDRN_LOCAL_CKPT_DIR:-/mnt/afs/TransparentObjectPose/test_repo}"
 ADS_CLI_BIN="${GDRN_ADS_CLI_BIN:-/mnt/afs/afs/ads-cli}"
-# OSS_CKPT_DIR="${GDRN_CKPT_OSS_DIR:-s3://019CA7860AC073D39601CF4E30339D2C:019CA7860AC073BA9804E6B73B9DC91F@rencwoss.aoss.cn-sh-01b.sensecoreapi-oss.cn/gdr_ckpt/multiview_rel_ar_vid_depth/}"
-OSS_CKPT_DIR="${GDRN_CKPT_OSS_DIR:-s3://019CA7860AC073D39601CF4E30339D2C:019CA7860AC073BA9804E6B73B9DC91F@rencwoss.aoss.cn-sh-01b.sensecoreapi-oss.cn/gdr_ckpt/multiview_abs_ar_vid_depth_TEST_ctx_info_interaction/}"
+# OSS_CKPT_DIR="${GDRN_CKPT_OSS_DIR:-s3://019CE739817A7E43855626E278830CD7:019CE739817A7E35801972419E02787C@jiycoss.aoss.cn-sh-01b.sensecoreapi-oss.cn/gdr_ckpt/multiview_rel_ar_vid_depth/}"
+OSS_CKPT_DIR="${GDRN_CKPT_OSS_DIR:-s3://019CE739817A7E43855626E278830CD7:019CE739817A7E35801972419E02787C@jiycoss.aoss.cn-sh-01g.sensecoreapi-oss.cn/gdr_ckpt/multiview_abs_ar_vid_depth_TEST_ctx_info_interaction/}"
 WEIGHTS="${GDRN_WEIGHTS_PATH:-${LOCAL_CKPT_DIR}/${DEFAULT_WEIGHTS_NAME}}"
 OBJ_CLS=1
 DATASET_NAME="labsim_test"
