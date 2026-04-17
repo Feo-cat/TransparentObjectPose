@@ -85,10 +85,70 @@ def make_multiview_batch(view_data_list, obj_cls):
     return batch
 
 
+def make_multiviewtime_batch(time_view_data_list, obj_cls):
+    """Pack [T][V] preprocessed views into one batch with shape [B=1, V, T, ...]."""
+    if len(time_view_data_list) == 0:
+        raise ValueError("time_view_data_list is empty")
+    num_times = len(time_view_data_list)
+    num_views = len(time_view_data_list[0])
+    if num_views == 0:
+        raise ValueError("time_view_data_list[0] has zero views")
+    for t_views in time_view_data_list:
+        if len(t_views) != num_views:
+            raise ValueError("All time steps must contain the same number of views")
+
+    def _stack_field(field_name):
+        arr = np.stack(
+            [[time_view_data_list[t][v][field_name] for t in range(num_times)] for v in range(num_views)],
+            axis=0,
+        )
+        return arr
+
+    roi_img = _stack_field("roi_img")
+    roi_coord_2d = _stack_field("roi_coord_2d")
+    roi_extent = _stack_field("roi_extent")
+    roi_cam = _stack_field("roi_cam")
+    roi_center = _stack_field("roi_center")
+    scale = _stack_field("scale")
+    roi_wh = _stack_field("roi_wh")
+    resize_ratio = _stack_field("resize_ratio")
+    input_images = _stack_field("input_image")
+
+    batch = {
+        "roi_img": torch.as_tensor(roi_img[None], dtype=torch.float32),            # [1, V, T, C, H, W]
+        "roi_coord_2d": torch.as_tensor(roi_coord_2d[None], dtype=torch.float32),  # [1, V, T, 2, H, W]
+        "roi_cls": torch.as_tensor([obj_cls], dtype=torch.long),                    # [1]
+        "roi_extent": torch.as_tensor(roi_extent[None], dtype=torch.float32),       # [1, V, T, 3]
+        "roi_cam": torch.as_tensor(roi_cam[None], dtype=torch.float32),             # [1, V, T, 3, 3]
+        "roi_center": torch.as_tensor(roi_center[None], dtype=torch.float32),       # [1, V, T, 2]
+        "scale": torch.as_tensor(scale[None], dtype=torch.float32),                 # [1, V, T, 1]
+        "roi_wh": torch.as_tensor(roi_wh[None], dtype=torch.float32),              # [1, V, T, 2]
+        "resize_ratio": torch.as_tensor(resize_ratio[None], dtype=torch.float32),  # [1, V, T]
+        "input_images": torch.as_tensor(input_images[None], dtype=torch.float32),  # [1, V, T, C, H, W]
+    }
+
+    if all(all("patch_mask" in time_view_data_list[t][v] for v in range(num_views)) for t in range(num_times)):
+        patch_mask = np.stack(
+            [[time_view_data_list[t][v]["patch_mask"] for t in range(num_times)] for v in range(num_views)],
+            axis=0,
+        )
+        batch["patch_mask"] = torch.as_tensor(patch_mask[None], dtype=bool)
+
+    if all(all("input_obj_mask" in time_view_data_list[t][v] for v in range(num_views)) for t in range(num_times)):
+        input_obj_masks = np.stack(
+            [[time_view_data_list[t][v]["input_obj_mask"] for t in range(num_times)] for v in range(num_views)],
+            axis=0,
+        )
+        batch["input_obj_masks"] = torch.as_tensor(input_obj_masks[None], dtype=torch.float32)
+
+    return batch
+
+
 def inference_multiview(
     model,
     batch,
     target_idx,
+    target_time_idx=None,
     model_infos=None,
     device="cuda",
     mask_thr=0.5,
@@ -121,6 +181,7 @@ def inference_multiview(
             seed_roi_centers=batch.get("roi_center", None),
             seed_scales=batch.get("scale", None),
             target_idx=target_idx,
+            target_time_idx=target_time_idx,
             mask_thr=mask_thr,
             min_mask_pixels=min_mask_pixels,
             external_target_masks=batch.get("input_obj_masks", None),
@@ -160,6 +221,80 @@ def build_window_pose_context(window_global_ids, all_results):
         torch.as_tensor(trans[None], dtype=torch.float32), # [1, N, 3]
         valid,
     )
+
+
+def build_window_pose_context_bvt(window_entries_by_time, pose_results_by_key):
+    """Build pseudo GT pose tensors for [V,T] window from already-predicted results."""
+    num_times = len(window_entries_by_time)
+    num_views = len(window_entries_by_time[0]) if num_times > 0 else 0
+    rot = np.tile(np.eye(3, dtype=np.float32)[None, None], (num_views, num_times, 1, 1))
+    trans = np.zeros((num_views, num_times, 3), dtype=np.float32)
+    valid = np.zeros((num_views, num_times), dtype=bool)
+    for t in range(num_times):
+        for v in range(num_views):
+            entry = window_entries_by_time[t][v]
+            key = entry["result_key"]
+            item = pose_results_by_key.get(key, None)
+            if item is None:
+                continue
+            if ("rotation" not in item) or ("translation" not in item):
+                continue
+            context_pose_valid = bool(item.get("context_pose_valid", True))
+            if not context_pose_valid:
+                continue
+            rot[v, t] = np.asarray(item["rotation"], dtype=np.float32)
+            trans[v, t] = np.asarray(item["translation"], dtype=np.float32)
+            valid[v, t] = True
+    return (
+        torch.as_tensor(rot[None], dtype=torch.float32),    # [1, V, T, 3, 3]
+        torch.as_tensor(trans[None], dtype=torch.float32),  # [1, V, T, 3]
+        valid,
+    )
+
+
+def _load_frame_manifest(manifest_path):
+    with open(manifest_path, "r") as f:
+        payload = json.load(f)
+    if not isinstance(payload, list):
+        raise ValueError("--frame_manifest must be a JSON array")
+    required = ["image_path", "time_id", "view_id"]
+    records = []
+    for i, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError(f"manifest[{i}] must be an object")
+        for key in required:
+            if key not in item:
+                raise ValueError(f"manifest[{i}] missing required key: {key}")
+        image_path = str(item["image_path"])
+        if not osp.isabs(image_path):
+            image_path = osp.abspath(image_path)
+        if not osp.isfile(image_path):
+            raise ValueError(f"manifest[{i}] image_path not found: {image_path}")
+        cam = item.get("cam", None)
+        if cam is not None:
+            cam = np.asarray(cam, dtype=np.float32).reshape(3, 3)
+        records.append(
+            {
+                "image_path": image_path,
+                "time_id": int(item["time_id"]),
+                "view_id": int(item["view_id"]),
+                "cam": cam,
+            }
+        )
+    records = sorted(records, key=lambda x: (x["time_id"], x["view_id"], x["image_path"]))
+    time_ids = sorted(set(r["time_id"] for r in records))
+    view_ids = sorted(set(r["view_id"] for r in records))
+    grouped = []
+    for time_id in time_ids:
+        rows = [r for r in records if r["time_id"] == time_id]
+        row_view_ids = [r["view_id"] for r in rows]
+        if sorted(row_view_ids) != view_ids:
+            raise ValueError(
+                f"Each time_id must contain the same view set. time_id={time_id}, got views={sorted(row_view_ids)}, expected={view_ids}"
+            )
+        by_view = {r["view_id"]: r for r in rows}
+        grouped.append([by_view[vid] for vid in view_ids])
+    return grouped, time_ids, view_ids
 
 
 def smooth_pose_temporally(cur_rot, cur_trans, prev_rot, prev_trans, rot_alpha=1.0, trans_alpha=1.0):
@@ -712,7 +847,16 @@ def main():
     parser = argparse.ArgumentParser(description="GDRN Multiview Video Inference")
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
     parser.add_argument("--weights", type=str, required=True, help="Path to model weights")
-    parser.add_argument("--image_dir", type=str, required=True, help="Path to frame folder")
+    parser.add_argument("--image_dir", type=str, default=None, help="Path to frame folder (legacy single-view mode)")
+    parser.add_argument(
+        "--frame_manifest",
+        type=str,
+        default=None,
+        help=(
+            "Optional JSON manifest for explicit multi-view multi-time inputs. "
+            "Each item: {image_path, time_id, view_id, cam(optional 3x3)}"
+        ),
+    )
     parser.add_argument(
         "--mask_dir",
         type=str,
@@ -977,6 +1121,363 @@ def main():
             raise ValueError(f"--mask_dir is not a directory: {args.mask_dir}")
         print(f"Using external masks from {args.mask_dir}")
         print("External masks will drive ROI extraction, mask attention, and refiner observation")
+
+    if args.frame_manifest is not None:
+        if args.image_dir is not None:
+            print("[INFO] --frame_manifest provided; --image_dir will be ignored in BVT mode.")
+        grouped_entries_by_time, manifest_time_ids, manifest_view_ids = _load_frame_manifest(args.frame_manifest)
+        num_times = len(grouped_entries_by_time)
+        num_views = len(manifest_view_ids)
+        if num_times < 1 or num_views < 1:
+            raise ValueError("frame_manifest must contain at least one time and one view")
+        results_dir = args.output_dir if args.output_dir is not None else osp.join(osp.dirname(args.frame_manifest), "results_vid")
+        os.makedirs(results_dir, exist_ok=True)
+        os.makedirs(osp.join(results_dir, "depth"), exist_ok=True)
+        os.makedirs(osp.join(results_dir, "mask"), exist_ok=True)
+        os.makedirs(osp.join(results_dir, "pointcloud"), exist_ok=True)
+        print(f"BVT manifest loaded: times={num_times}, views={num_views}")
+        print(f"Results will be saved to {results_dir}")
+
+        # Preprocess manifest frames
+        view_data_grid = []
+        obj_cls_list = []
+        for t_local, entries_at_t in enumerate(tqdm(grouped_entries_by_time, desc="Loading manifest frames")):
+            row = []
+            for v_local, entry in enumerate(entries_at_t):
+                image_path = entry["image_path"]
+                image_name = osp.basename(image_path)
+                image = read_image_cv2(image_path, format=cfg.INPUT.FORMAT)
+                external_mask = None
+                mask_path = None
+                if args.mask_dir is not None:
+                    mask_path = _find_mask_path_for_image(image_name, args.mask_dir)
+                    if mask_path is None:
+                        raise ValueError(f"No external mask found for frame {image_name} in {args.mask_dir}")
+                    external_mask = _load_external_mask(mask_path, image.shape[:2])
+
+                h, w = image.shape[:2]
+                bbox = [0.0, 0.0, float(max(w - 1, 1)), float(max(h - 1, 1))]
+                obj_cls = args.obj_cls
+
+                old_cam = cfg.TEST_CAM
+                if entry["cam"] is not None:
+                    cfg.TEST_CAM = np.asarray(entry["cam"], dtype=np.float32).reshape(3, 3)
+                view_data, obj_cls = preprocess_single_view(cfg, image, bbox, obj_cls, args.dataset_name)
+                cfg.TEST_CAM = old_cam
+
+                if external_mask is not None:
+                    target_hw = view_data["input_image"].shape[1:]
+                    view_data["input_obj_mask"] = _load_external_mask(mask_path, target_hw)
+                    view_data["input_obj_mask_path"] = mask_path
+                    view_data["roi_source"] = "external_mask"
+                else:
+                    view_data["roi_source"] = "predicted_mask"
+
+                result_key = f"t{int(entry['time_id']):06d}_v{int(entry['view_id']):03d}"
+                view_data["manifest_time_local"] = int(t_local)
+                view_data["manifest_view_local"] = int(v_local)
+                view_data["manifest_time_id"] = int(entry["time_id"])
+                view_data["manifest_view_id"] = int(entry["view_id"])
+                view_data["manifest_result_key"] = result_key
+                view_data["manifest_image_name"] = image_name
+                view_data["manifest_output_id"] = f"{result_key}_{osp.splitext(image_name)[0]}"
+                row.append(view_data)
+                obj_cls_list.append(int(obj_cls))
+            view_data_grid.append(row)
+
+        obj_cls_mv = obj_cls_list[0]
+        if any(c != obj_cls_mv for c in obj_cls_list):
+            raise ValueError("Inconsistent obj_cls across manifest entries")
+
+        windows = build_autoregressive_windows(
+            num_times,
+            chunk_size=args.ar_context_size + args.ar_target_size,
+            context_size=args.ar_context_size,
+            target_size=args.ar_target_size,
+        )
+        if len(windows) == 0:
+            raise ValueError(f"Need at least 1 time step for AR inference, got {num_times}")
+
+        print(
+            f"Running autoregressive BVT inference: {len(windows)} chunks, "
+            f"chunk_size={args.ar_context_size + args.ar_target_size} "
+            f"({args.ar_context_size}-context+{args.ar_target_size}-target) along time axis"
+        )
+
+        all_results = {}
+        pose_results_by_key = {}
+        roi_results_by_key = {}
+        mask_results_by_key = {}
+        points_obj_all = []
+        colors_all = []
+        x_ref = None
+        prev_smoothed_rot_by_view = {int(v): None for v in manifest_view_ids}
+        prev_smoothed_trans_by_view = {int(v): None for v in manifest_view_ids}
+        prev_smoothed_roi_center_by_view = {int(v): None for v in manifest_view_ids}
+        prev_smoothed_scale_by_view = {int(v): None for v in manifest_view_ids}
+        prev_smoothed_roi_wh_by_view = {int(v): None for v in manifest_view_ids}
+        view_palette = np.array(
+            [[255, 64, 64], [64, 255, 64], [64, 128, 255], [255, 255, 64], [255, 64, 255], [64, 255, 255]],
+            dtype=np.uint8,
+        )
+
+        for chunk_i, window_spec in enumerate(windows):
+            window_time_local_ids = window_spec["window_global_ids"]
+            window_entries_by_time = [grouped_entries_by_time[t] for t in window_time_local_ids]
+            window_view_data_by_time = [view_data_grid[t] for t in window_time_local_ids]
+            batch = make_multiviewtime_batch(window_view_data_by_time, obj_cls_mv)
+
+            for t_local in range(len(window_time_local_ids)):
+                for v_local in range(num_views):
+                    key = window_view_data_by_time[t_local][v_local]["manifest_result_key"]
+                    roi_item = roi_results_by_key.get(key, None)
+                    if roi_item is None:
+                        continue
+                    batch["roi_center"][0, v_local, t_local] = torch.as_tensor(
+                        roi_item["roi_center"], dtype=batch["roi_center"].dtype
+                    )
+                    batch["scale"][0, v_local, t_local] = torch.as_tensor(roi_item["scale"], dtype=batch["scale"].dtype)
+                    batch["roi_wh"][0, v_local, t_local] = torch.as_tensor(roi_item["roi_wh"], dtype=batch["roi_wh"].dtype)
+                    batch["resize_ratio"][0, v_local, t_local] = torch.as_tensor(
+                        roi_item["resize_ratio"], dtype=batch["resize_ratio"].dtype
+                    )
+
+            target_time_idx = window_spec["target_local_ids"]
+            if len(target_time_idx) == 0:
+                continue
+
+            first_target_t_local = int(target_time_idx[0])
+            first_target_t_global = int(window_time_local_ids[first_target_t_local])
+            prev_t_global = first_target_t_global - 1
+            prev_clean_mask = None
+            if prev_t_global >= 0:
+                prev_key = f"t{int(manifest_time_ids[prev_t_global]):06d}_v{int(manifest_view_ids[0]):03d}"
+                prev_clean_mask = mask_results_by_key.get(prev_key, None)
+            if prev_clean_mask is not None:
+                batch["prev_target_mask"] = torch.as_tensor(prev_clean_mask[None, None], dtype=torch.float32)
+
+            ctx_rot_bt, ctx_trans_bt, ctx_valid = build_window_pose_context_bvt(
+                window_entries_by_time, pose_results_by_key
+            )
+            batch["gt_ego_rot"] = ctx_rot_bt
+            batch["gt_trans"] = ctx_trans_bt
+            batch["gt_pose_valid"] = torch.as_tensor(ctx_valid[None], dtype=torch.bool)
+
+            context_last_local = max(min(target_time_idx) - 1, 0)
+            has_context_last = bool(np.any(ctx_valid[:, context_last_local])) if ctx_valid.size > 0 else False
+            print(
+                f"[chunk {chunk_i+1}/{len(windows)}] time={manifest_time_ids[window_time_local_ids[0]]}.."
+                f"{manifest_time_ids[window_time_local_ids[-1]]}, mode={window_spec['mode']}, "
+                f"target_times={len(target_time_idx)}"
+            )
+
+            out_dict = inference_multiview(
+                model,
+                batch,
+                target_idx=target_time_idx,
+                target_time_idx=target_time_idx,
+                model_infos=[model_info],
+                device=args.device,
+                mask_thr=args.mask_thr,
+                min_mask_pixels=args.min_mask_pixels,
+                mask_postproc=args.mask_postproc,
+                mask_prev_dilate_kernel=args.mask_prev_dilate_kernel,
+                mask_prev_gate=args.mask_prev_gate,
+                mask_post_open_kernel=args.mask_post_open_kernel,
+                mask_post_dilate_kernel=args.mask_post_dilate_kernel,
+                mask_post_close_kernel=args.mask_post_close_kernel,
+                mask_fallback_to_prev=args.mask_fallback_to_prev,
+                external_mask_pad_scale=args.external_mask_pad_scale,
+            )
+
+            pred_rot = out_dict.get("abs_rot", out_dict["rot"]).detach().cpu().numpy()
+            pred_trans = out_dict.get("abs_trans", out_dict["trans"]).detach().cpu().numpy()
+            expected_out_num = len(target_time_idx) * num_views
+            if pred_rot.shape[0] != expected_out_num or pred_trans.shape[0] != expected_out_num:
+                raise RuntimeError(
+                    f"Unexpected BVT output shape: rot={pred_rot.shape}, trans={pred_trans.shape}, expected={expected_out_num}"
+                )
+
+            out_i = 0
+            for t_local in target_time_idx:
+                t_local = int(t_local)
+                t_global = int(window_time_local_ids[t_local])
+                time_id = int(manifest_time_ids[t_global])
+                for v_local in range(num_views):
+                    view_id = int(manifest_view_ids[v_local])
+                    view_data = window_view_data_by_time[t_local][v_local]
+                    result_key = view_data["manifest_result_key"]
+                    image_name = view_data["manifest_image_name"]
+                    image_id = view_data["manifest_output_id"]
+
+                    raw_rot = pred_rot[out_i].astype(np.float32)
+                    raw_trans = pred_trans[out_i].astype(np.float32)
+                    cur_rot = raw_rot.copy()
+                    cur_trans = raw_trans.copy()
+
+                    if args.temporal_smooth:
+                        cur_rot, cur_trans = smooth_pose_temporally(
+                            cur_rot=cur_rot,
+                            cur_trans=cur_trans,
+                            prev_rot=prev_smoothed_rot_by_view[view_id],
+                            prev_trans=prev_smoothed_trans_by_view[view_id],
+                            rot_alpha=args.temporal_smooth_rot_alpha,
+                            trans_alpha=args.temporal_smooth_trans_alpha,
+                        )
+
+                    if args.symm_mode == "continuous":
+                        if args.symm_axis is None:
+                            raise ValueError("symm_mode=continuous requires --symm_axis")
+                        cur_rot, x_ref = stabilize_rotation_given_axis_single(cur_rot, np.array(args.symm_axis), x_ref)
+
+                    prev_smoothed_rot_by_view[view_id] = cur_rot.copy()
+                    prev_smoothed_trans_by_view[view_id] = cur_trans.copy()
+
+                    all_results[result_key] = {
+                        "image_name": image_name,
+                        "rotation": cur_rot.tolist(),
+                        "translation": cur_trans.tolist(),
+                        "raw_rotation": raw_rot.tolist(),
+                        "raw_translation": raw_trans.tolist(),
+                        "time_id": time_id,
+                        "view_id": view_id,
+                        "source_time_index": t_global,
+                        "target_mode": window_spec["mode"],
+                        "chunk_index": int(chunk_i),
+                        "has_context_last": bool(has_context_last),
+                    }
+
+                    pose_results_by_key[result_key] = {
+                        "rotation": raw_rot.tolist(),
+                        "translation": raw_trans.tolist(),
+                        "context_pose_valid": True,
+                    }
+                    if "target_view_mask_clean" in out_dict:
+                        mask_results_by_key[result_key] = (
+                            out_dict["target_view_mask_clean"][0, out_i, 0].detach().cpu().numpy() > 0.5
+                        ).astype(np.uint8)
+
+                    if (
+                        "infer_roi_centers" in out_dict
+                        and "infer_scales" in out_dict
+                        and "infer_roi_whs" in out_dict
+                        and "infer_resize_ratios" in out_dict
+                    ):
+                        raw_roi_center = out_dict["infer_roi_centers"][0, out_i].detach().cpu().numpy().astype(np.float32).reshape(2)
+                        raw_scale = out_dict["infer_scales"][0, out_i].detach().cpu().numpy().astype(np.float32).reshape(-1)
+                        raw_roi_wh = out_dict["infer_roi_whs"][0, out_i].detach().cpu().numpy().astype(np.float32).reshape(2)
+                        roi_center = raw_roi_center.copy()
+                        scale = raw_scale.copy()
+                        roi_wh = raw_roi_wh.copy()
+                        roi_alpha_used = 1.0
+                        if args.roi_temporal_smooth:
+                            roi_center, scale, roi_wh, roi_alpha_used = smooth_roi_temporally(
+                                cur_roi_center=roi_center,
+                                cur_scale=scale,
+                                cur_roi_wh=roi_wh,
+                                prev_roi_center=prev_smoothed_roi_center_by_view[view_id],
+                                prev_scale=prev_smoothed_scale_by_view[view_id],
+                                prev_roi_wh=prev_smoothed_roi_wh_by_view[view_id],
+                                smooth_type=args.roi_temporal_smooth_type,
+                                alpha=args.roi_temporal_smooth_alpha,
+                                min_alpha=args.roi_temporal_smooth_min_alpha,
+                                max_alpha=args.roi_temporal_smooth_max_alpha,
+                            )
+                        prev_smoothed_roi_center_by_view[view_id] = roi_center.copy()
+                        prev_smoothed_scale_by_view[view_id] = scale.copy()
+                        prev_smoothed_roi_wh_by_view[view_id] = roi_wh.copy()
+                        resize_ratio = float(cfg.MODEL.CDPN.BACKBONE.OUTPUT_RES / max(float(scale[0]), 1e-6))
+                        roi_results_by_key[result_key] = {
+                            "roi_center": raw_roi_center.tolist(),
+                            "scale": raw_scale.tolist(),
+                            "roi_wh": raw_roi_wh.tolist(),
+                            "resize_ratio": resize_ratio,
+                        }
+                        all_results[result_key].update(
+                            {
+                                "roi_center": roi_center.tolist(),
+                                "scale": scale.tolist(),
+                                "roi_wh": roi_wh.tolist(),
+                                "resize_ratio": resize_ratio,
+                                "roi_temporal_smooth_alpha_used": float(roi_alpha_used),
+                            }
+                        )
+
+                    all_results[result_key].update(
+                        save_depth_and_mask_multiview(out_dict=out_dict, out_i=out_i, image_id=image_id, results_dir=results_dir)
+                    )
+                    if args.save_coor_xyz_npy:
+                        all_results[result_key].update(
+                            save_coor_xyz_npy_multiview(out_dict=out_dict, out_i=out_i, image_id=image_id, results_dir=results_dir)
+                        )
+                    if args.save_pnp_input_debug:
+                        all_results[result_key].update(
+                            save_pnp_input_debug_npy_multiview(
+                                out_dict=out_dict, out_i=out_i, image_id=image_id, results_dir=results_dir
+                            )
+                        )
+
+                    pred_depth, pred_mask_raw = _get_pred_depth_mask_by_out_idx(out_dict, out_i)
+                    if pred_depth is not None:
+                        if pred_mask_raw.min() >= 0.0 and pred_mask_raw.max() <= 1.0:
+                            pred_mask = pred_mask_raw
+                        else:
+                            pred_mask = _sigmoid_numpy(pred_mask_raw)
+                        valid = np.isfinite(pred_depth) & (pred_depth > 0) & (pred_mask > 0.5)
+                        if np.any(valid):
+                            K = batch["roi_cam"][0, v_local, t_local].detach().cpu().numpy().astype(np.float32)
+                            pts_cam = depth_to_cam_points(pred_depth, K, valid)
+                            pts_obj = cam_to_obj(pts_cam.astype(np.float32), cur_rot.astype(np.float32), cur_trans.astype(np.float32))
+                            if pts_obj.shape[0] > 0:
+                                color_i = np.tile(view_palette[v_local % len(view_palette)][None, :], (pts_obj.shape[0], 1))
+                                points_obj_all.append(pts_obj)
+                                colors_all.append(color_i)
+
+                    if args.save_vis:
+                        vis_output_path = osp.join(results_dir, f"{image_id}_pred.png")
+                        K = batch["roi_cam"][0, v_local, t_local].detach().cpu().numpy().astype(np.float32)
+                        if args.symm_mode == "none":
+                            visualize_example(
+                                K=K,
+                                image=view_data["original_image"],
+                                RT=np.concatenate([cur_rot, cur_trans[..., None]], axis=1),
+                                size=model_size,
+                                output_path=vis_output_path,
+                            )
+                        else:
+                            visualize_symmetric_object(
+                                K=K,
+                                image=view_data["original_image"],
+                                RT=np.concatenate([cur_rot, cur_trans[..., None]], axis=1),
+                                size=model_size,
+                                symmetry_axis="z",
+                                output_path=vis_output_path,
+                                color=(0, 255, 0),
+                                thickness=1,
+                            )
+                    out_i += 1
+
+        fused_pcd_path = ""
+        if len(points_obj_all) > 0:
+            points_obj = np.concatenate(points_obj_all, axis=0)
+            colors = np.concatenate(colors_all, axis=0)
+            max_points = 200000
+            if points_obj.shape[0] > max_points:
+                keep_idx = np.random.choice(points_obj.shape[0], max_points, replace=False)
+                points_obj = points_obj[keep_idx]
+                colors = colors[keep_idx]
+            fused_pcd_path = osp.join(results_dir, "pointcloud", "pred_depth_fused_obj.ply")
+            write_ply_xyzrgb(fused_pcd_path, points_obj.astype(np.float32), colors.astype(np.uint8))
+        if fused_pcd_path:
+            for key in all_results:
+                all_results[key]["pointcloud_fused_obj_path"] = fused_pcd_path
+
+        results_json_path = osp.join(results_dir, "results.json")
+        with open(results_json_path, "w") as f:
+            json.dump(all_results, f, indent=2)
+        print(f"Results saved to {results_json_path}")
+        print(f"Predicted frames: {len(all_results)} / {num_times * num_views}")
+        return
 
     image_exts = [args.image_ext, args.image_ext.lower(), args.image_ext.upper()]
     image_files = []

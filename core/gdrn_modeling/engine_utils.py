@@ -4,6 +4,47 @@ import numpy as np
 import itertools
 
 
+def _reshape_bn_tensor_to_bvt(tensor, num_views):
+    if (not torch.is_tensor(tensor)) or tensor.dim() < 2:
+        return tensor
+    B, N = tensor.shape[:2]
+    if N % int(num_views) != 0:
+        return tensor
+    num_times = N // int(num_views)
+    return tensor.reshape(B, int(num_views), num_times, *tensor.shape[2:]).contiguous()
+
+
+def _reshape_pairwise_bn_to_bvt(tensor, num_views):
+    if (not torch.is_tensor(tensor)) or tensor.dim() < 3:
+        return tensor
+    B, N0, N1 = tensor.shape[:3]
+    if N0 != N1 or N0 % int(num_views) != 0:
+        return tensor
+    num_times = N0 // int(num_views)
+    return tensor.reshape(B, int(num_views), num_times, int(num_views), num_times, *tensor.shape[3:]).contiguous()
+
+
+def _maybe_reshape_batch_to_view_time(cfg, batch):
+    num_views = int(cfg.MODEL.CDPN.PNP_NET.get("TRAIN_NUM_VIEWS", 1))
+    if num_views <= 1:
+        return batch
+    roi_img = batch.get("roi_img", None)
+    if (not torch.is_tensor(roi_img)) or roi_img.dim() < 2:
+        return batch
+    N = int(roi_img.shape[1])
+    if N % num_views != 0:
+        return batch
+
+    for key, value in list(batch.items()):
+        if not torch.is_tensor(value):
+            continue
+        if key in ["rel_rot_mat", "rel_trans_mat"] and value.dim() >= 3 and value.shape[1] == N and value.shape[2] == N:
+            batch[key] = _reshape_pairwise_bn_to_bvt(value, num_views)
+        elif value.dim() >= 2 and value.shape[1] == N:
+            batch[key] = _reshape_bn_tensor_to_bvt(value, num_views)
+    return batch
+
+
 def batch_data(cfg, data, device="cuda", phase="train"):
     if phase != "train":
         return batch_data_test(cfg, data, device=device)
@@ -74,7 +115,7 @@ def batch_data(cfg, data, device="cuda", phase="train"):
     if "model_info" in data[0]:
         batch["model_info"] = [d["model_info"] for d in data]
 
-    return batch
+    return _maybe_reshape_batch_to_view_time(cfg, batch)
 
 
 
@@ -191,11 +232,11 @@ def batch_data_rand_num_perm(cfg, data, device="cuda", phase="train"):
     if "model_info" in data[0]:
         batch["model_info"] = [d["model_info"] for d in data]
 
-    for key in ["file_name", "scene_im_id", "inst_id", "dataset_name"]:
+    for key in ["file_name", "scene_im_id", "time_id", "view_id", "inst_id", "dataset_name"]:
         if key in data[0]:
             batch[key] = [_slice_list(d[key]) for d in data]
 
-    return batch
+    return _maybe_reshape_batch_to_view_time(cfg, batch)
 
 
 
@@ -222,7 +263,7 @@ def batch_data_test(cfg, data, device="cuda"):
 
     batch["roi_cam"] = torch.cat([d["cam"] for d in data], dim=0).to(device, non_blocking=True)
     batch["roi_center"] = torch.cat([d["bbox_center"] for d in data], dim=0).to(device, non_blocking=True)
-    for key in ["scene_im_id", "file_name", "model_info"]:
+    for key in ["scene_im_id", "file_name", "time_id", "view_id", "model_info"]:
         # flatten the lists
         if key in data[0]:
             batch[key] = list(itertools.chain(*[d[key] for d in data]))

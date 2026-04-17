@@ -33,6 +33,17 @@ from .test_utils import _to_str, eval_cached_results, save_and_eval_results, to_
 from .view_interaction_utils import analyze_target_indices, collect_view_interaction_model_kwargs
 
 
+
+def _flatten_eval_pose_tensor(tensor):
+    if not torch.is_tensor(tensor):
+        return tensor
+    if tensor.dim() == 5:
+        # [B, V, T, ...] -> [B*V*T, ...]
+        return tensor.reshape(tensor.shape[0] * tensor.shape[1] * tensor.shape[2], *tensor.shape[3:]).contiguous()
+    if tensor.dim() == 4:
+        # [B, T, ...] -> [B*T, ...]
+        return tensor.reshape(tensor.shape[0] * tensor.shape[1], *tensor.shape[2:]).contiguous()
+    return tensor
 class GDRN_Evaluator(DatasetEvaluator):
     """use bop toolkit to evaluate."""
 
@@ -145,8 +156,8 @@ class GDRN_Evaluator(DatasetEvaluator):
             else:
                 raise NotImplementedError
 
-        out_rots = out_dict["rot"].detach().to(self._cpu_device).numpy()
-        out_transes = out_dict["trans"].detach().to(self._cpu_device).numpy()
+        out_rots = _flatten_eval_pose_tensor(out_dict["rot"]).detach().to(self._cpu_device).numpy()
+        out_transes = _flatten_eval_pose_tensor(out_dict["trans"]).detach().to(self._cpu_device).numpy()
 
         out_i = -1
         for i, (_input, output) in enumerate(zip(inputs, outputs)):
@@ -204,8 +215,8 @@ class GDRN_Evaluator(DatasetEvaluator):
         out_mask = get_out_mask(cfg, out_dict["mask"].detach())
         out_mask = out_mask.to(self._cpu_device).numpy()
 
-        out_rots = out_dict["rot"].detach().to(self._cpu_device).numpy()
-        out_transes = out_dict["trans"].detach().to(self._cpu_device).numpy()
+        out_rots = _flatten_eval_pose_tensor(out_dict["rot"]).detach().to(self._cpu_device).numpy()
+        out_transes = _flatten_eval_pose_tensor(out_dict["trans"]).detach().to(self._cpu_device).numpy()
 
         out_i = -1
         for i, (_input, output) in enumerate(zip(inputs, outputs)):
@@ -332,7 +343,7 @@ class GDRN_Evaluator(DatasetEvaluator):
         out_mask = get_out_mask(cfg, out_dict["mask"].detach())
         out_mask = out_mask.to(self._cpu_device).numpy()
 
-        out_trans = out_dict["trans"].detach().to(self._cpu_device).numpy()
+        out_trans = _flatten_eval_pose_tensor(out_dict["trans"]).detach().to(self._cpu_device).numpy()
         out_i = -1
         for i, (_input, output) in enumerate(zip(inputs, outputs)):
             start_process_time = time.perf_counter()
@@ -556,7 +567,7 @@ def gdrn_inference_on_dataset(cfg, model, data_loader, evaluator, amp_test=False
 
             start_compute_time = time.perf_counter()
             #############################
-            # process input â€” data is already in (B, N, ...) format
+            # process input â€?data is already in (B, N, ...) format
             if not isinstance(inputs, list):  # bs=1
                 inputs = [inputs]
             sample = inputs[0]
@@ -590,7 +601,7 @@ def gdrn_inference_on_dataset(cfg, model, data_loader, evaluator, amp_test=False
                 if all(_obj not in evaluator.train_objs for _obj in obj_names):
                     continue
 
-            # Data is already (B, N, ...) â€” send to device directly
+            # Data is already (B, N, ...) â€?send to device directly
             roi_img = sample["roi_img"].to(device)              # (B, N, C, H, W)
             roi_cls = sample["roi_cls"].to(device=device, dtype=torch.long)  # (B,)
             roi_cam = sample["cam"].to(device)                  # (B, N, 3, 3)
@@ -637,7 +648,7 @@ def gdrn_inference_on_dataset(cfg, model, data_loader, evaluator, amp_test=False
             cur_compute_time = time.perf_counter() - start_compute_time
             total_compute_time += cur_compute_time
 
-            # Prepare inputs for evaluator â€” extract target view data
+            # Prepare inputs for evaluator â€?extract target view data
             is_list_target = isinstance(target_idx, (list, tuple))
             target_idx_list = list(target_idx) if is_list_target else None
             num_target_views = len(target_idx_list) if target_idx_list is not None else 1
@@ -699,7 +710,7 @@ def gdrn_inference_on_dataset(cfg, model, data_loader, evaluator, amp_test=False
                             target_input[key] = [val[b][target_idx] for b in range(num_inst)]
                     else:
                         target_input[key] = val
-            # height, width: list of lists â†’ extract target view
+            # height, width: list of lists â†?extract target view
             for key in ["height", "width"]:
                 if key in sample:
                     val = sample[key]
@@ -710,7 +721,7 @@ def gdrn_inference_on_dataset(cfg, model, data_loader, evaluator, amp_test=False
                             target_input[key] = [val[b][target_idx] for b in range(num_inst)]
                     else:
                         target_input[key] = val
-            # Map height/width â†’ im_H/im_W for evaluator compatibility
+            # Map height/width â†?im_H/im_W for evaluator compatibility
             if "height" in target_input:
                 target_input["im_H"] = target_input["height"]
             if "width" in target_input:

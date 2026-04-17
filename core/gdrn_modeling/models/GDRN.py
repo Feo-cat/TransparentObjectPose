@@ -470,6 +470,9 @@ class GDRN(nn.Module):
         rel_geo_cfg = vi_cfg.get("RELATIVE_GEOMETRY_LOSS", {})
         self.rel_geo_loss_enabled = bool(rel_geo_cfg.get("ENABLED", False))
         self.relative_geo_sym_loss = RelativeGeoSymLoss()
+        vt_cfg = cfg.MODEL.CDPN.get("VIEW_TIME_MODELING", {})
+        self.same_time_view_fusion_enabled = bool(vt_cfg.get("ENABLE_SAME_TIME_VIEW_FUSION", True))
+        self.same_time_view_fusion_alpha = float(vt_cfg.get("SAME_TIME_VIEW_FUSION_ALPHA", 0.35))
         
         self.depth_head = DepthHead(
             in_channels=feat_dim,
@@ -725,6 +728,61 @@ class GDRN(nn.Module):
             ctx_rot = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).repeat(batch_size, 1, 1)
             ctx_trans = torch.zeros(batch_size, 3, device=device, dtype=dtype)
         return ctx_rot, ctx_trans
+
+    @staticmethod
+    def _normalize_index_list(index_value, total_len, name):
+        if total_len <= 0:
+            return []
+        if isinstance(index_value, (list, tuple)):
+            values = [int(v) for v in index_value]
+        elif isinstance(index_value, np.ndarray):
+            values = [int(v) for v in index_value.reshape(-1).tolist()]
+        elif torch.is_tensor(index_value):
+            values = [int(v) for v in index_value.reshape(-1).tolist()]
+        else:
+            values = [int(index_value)]
+        if len(values) == 0:
+            raise ValueError(f"{name} cannot be empty")
+        normalized = []
+        for value in values:
+            idx = int(value)
+            if idx < 0:
+                idx += int(total_len)
+            if idx < 0 or idx >= int(total_len):
+                raise ValueError(f"{name} index {value} out of range for length {total_len}")
+            normalized.append(idx)
+        return normalized
+
+    @staticmethod
+    def _flatten_view_time_tensor(tensor, num_views, num_times):
+        if tensor is None or (not torch.is_tensor(tensor)):
+            return tensor
+        if tensor.dim() >= 3 and tensor.shape[1] == num_views and tensor.shape[2] == num_times:
+            return tensor.reshape(tensor.shape[0], num_views * num_times, *tensor.shape[3:]).contiguous()
+        return tensor
+
+    @staticmethod
+    def _expand_target_times_to_flat_indices(target_time_ids, num_views, num_times):
+        # Flatten order is [view-major, then time], i.e. flat_idx = view_id * T + time_id.
+        return [int(v * num_times + t) for t in target_time_ids for v in range(num_views)]
+
+    def _apply_same_time_view_fusion(self, hidden_by_view, num_views, num_times):
+        if (
+            (not self.same_time_view_fusion_enabled)
+            or num_views <= 1
+            or num_times <= 0
+            or hidden_by_view.shape[1] != num_views * num_times
+        ):
+            return hidden_by_view
+        alpha = float(self.same_time_view_fusion_alpha)
+        alpha = max(0.0, alpha)
+        hidden_bvthw = hidden_by_view.reshape(
+            hidden_by_view.shape[0], num_views, num_times, hidden_by_view.shape[2], hidden_by_view.shape[3]
+        ).contiguous()
+        hidden_bt_v = hidden_bvthw.permute(0, 2, 1, 3, 4).contiguous()
+        same_time_mean = hidden_bt_v.mean(dim=2, keepdim=True)
+        hidden_bt_v = hidden_bt_v + alpha * same_time_mean
+        return hidden_bt_v.permute(0, 2, 1, 3, 4).reshape_as(hidden_by_view).contiguous()
 
     def _encode_view_tokens_to_roi_features(self, view_hidden, roi_centers, scales, H, W):
         """Convert decoded per-view tokens into ROI-aligned feature maps for the pose heads."""
@@ -1755,6 +1813,7 @@ class GDRN(nn.Module):
         external_target_masks=None,
         noisy_obj_masks=None,
         target_idx=None, # here idx can be a list of indices
+        target_time_idx=None,
         do_loss=False,
         model_points=None,
     ):
@@ -1763,6 +1822,42 @@ class GDRN(nn.Module):
         pnp_net_cfg = cfg.MODEL.CDPN.PNP_NET
         profile_forward_t0 = self._hotspot_profile_begin_forward() if do_loss else None
 
+        use_view_time_layout = input_images.dim() == 6
+        full_num_views = 1
+        full_num_times = None
+        if use_view_time_layout:
+            B, full_num_views, full_num_times, C, H, W = input_images.shape
+            input_images = input_images.reshape(B, full_num_views * full_num_times, C, H, W).contiguous()
+            x = self._flatten_view_time_tensor(x, full_num_views, full_num_times)
+            gt_xyz = self._flatten_view_time_tensor(gt_xyz, full_num_views, full_num_times)
+            gt_xyz_bin = self._flatten_view_time_tensor(gt_xyz_bin, full_num_views, full_num_times)
+            gt_mask_trunc = self._flatten_view_time_tensor(gt_mask_trunc, full_num_views, full_num_times)
+            gt_mask_visib = self._flatten_view_time_tensor(gt_mask_visib, full_num_views, full_num_times)
+            gt_mask_obj = self._flatten_view_time_tensor(gt_mask_obj, full_num_views, full_num_times)
+            gt_region = self._flatten_view_time_tensor(gt_region, full_num_views, full_num_times)
+            gt_allo_quat = self._flatten_view_time_tensor(gt_allo_quat, full_num_views, full_num_times)
+            gt_ego_quat = self._flatten_view_time_tensor(gt_ego_quat, full_num_views, full_num_times)
+            gt_allo_rot6d = self._flatten_view_time_tensor(gt_allo_rot6d, full_num_views, full_num_times)
+            gt_ego_rot6d = self._flatten_view_time_tensor(gt_ego_rot6d, full_num_views, full_num_times)
+            gt_ego_rot = self._flatten_view_time_tensor(gt_ego_rot, full_num_views, full_num_times)
+            gt_points = self._flatten_view_time_tensor(gt_points, full_num_views, full_num_times)
+            gt_trans = self._flatten_view_time_tensor(gt_trans, full_num_views, full_num_times)
+            gt_trans_ratio = self._flatten_view_time_tensor(gt_trans_ratio, full_num_views, full_num_times)
+            roi_coord_2d = self._flatten_view_time_tensor(roi_coord_2d, full_num_views, full_num_times)
+            roi_cams = self._flatten_view_time_tensor(roi_cams, full_num_views, full_num_times)
+            roi_centers = self._flatten_view_time_tensor(roi_centers, full_num_views, full_num_times)
+            scales = self._flatten_view_time_tensor(scales, full_num_views, full_num_times)
+            roi_whs = self._flatten_view_time_tensor(roi_whs, full_num_views, full_num_times)
+            roi_extents = self._flatten_view_time_tensor(roi_extents, full_num_views, full_num_times)
+            resize_ratios = self._flatten_view_time_tensor(resize_ratios, full_num_views, full_num_times)
+            input_depths = self._flatten_view_time_tensor(input_depths, full_num_views, full_num_times)
+            input_obj_masks = self._flatten_view_time_tensor(input_obj_masks, full_num_views, full_num_times)
+            external_target_masks = self._flatten_view_time_tensor(
+                external_target_masks, full_num_views, full_num_times
+            )
+            noisy_obj_masks = self._flatten_view_time_tensor(noisy_obj_masks, full_num_views, full_num_times)
+        else:
+            B, N, C, H, W = input_images.shape
         B, N, C, H, W = input_images.shape
         h_p, w_p = H // 16, W // 16
         target_view_depth = None
@@ -1805,7 +1900,20 @@ class GDRN(nn.Module):
         full_input_depths = input_depths      # (B, N, H, W) before target slicing
         full_input_obj_masks = input_obj_masks  # (B, N, H, W) before target slicing
 
-        target_idx_list, has_context_for_target, is_all_target = analyze_target_indices(target_idx, N)
+        if use_view_time_layout:
+            target_time_raw = target_time_idx if target_time_idx is not None else target_idx
+            if target_time_raw is None:
+                target_time_raw = list(range(full_num_times))
+            target_time_ids = self._normalize_index_list(target_time_raw, full_num_times, "target_time_idx")
+            target_idx_list = self._expand_target_times_to_flat_indices(
+                target_time_ids, full_num_views, full_num_times
+            )
+            has_context_for_target = min(target_time_ids) > 0 if len(target_time_ids) > 0 else False
+            is_all_target = len(target_time_ids) == full_num_times
+            target_idx = target_idx_list
+        else:
+            target_time_ids = None
+            target_idx_list, has_context_for_target, is_all_target = analyze_target_indices(target_idx, N)
 
         gt_xyz = gt_xyz[:, target_idx] if gt_xyz is not None else None
         gt_xyz_bin = gt_xyz_bin[:, target_idx] if gt_xyz_bin is not None else None
@@ -1867,7 +1975,11 @@ class GDRN(nn.Module):
         else:
             target_num = 1
 
-        context_last_idx = max(min(target_idx_list) - 1, 0)
+        if use_view_time_layout and target_time_ids is not None:
+            context_last_time = max(min(target_time_ids) - 1, 0)
+            context_last_idx = int(context_last_time)
+        else:
+            context_last_idx = max(min(target_idx_list) - 1, 0)
 
         if cfg.MODEL.CDPN.VGGT_BACKBONE:
             # encode by dinov3, here we only encode the target view for single view implementation test
@@ -1905,6 +2017,8 @@ class GDRN(nn.Module):
             hidden, pos = self.decode(hidden, N, H, W) # (B*N, hw, C)
             self._hotspot_profile_stop("decode_tokens", profile_decode_t0, batch_size=B, view_num=N)
             hidden_by_view = hidden.reshape(B, N, h_p * w_p, -1).contiguous()
+            if use_view_time_layout:
+                hidden_by_view = self._apply_same_time_view_fusion(hidden_by_view, full_num_views, full_num_times)
             target_hidden = hidden_by_view[:, target_idx].contiguous()
 
             # depth head to output the depth and mask
@@ -2949,6 +3063,7 @@ class GDRN(nn.Module):
         seed_roi_centers=None,
         seed_scales=None,
         target_idx=-1,
+        target_time_idx=None,
         mask_thr=0.5,
         min_mask_pixels=16,
         model_points=None,
@@ -2974,12 +3089,40 @@ class GDRN(nn.Module):
         if roi_cams is None or roi_extents is None:
             raise ValueError("forward_infer requires roi_cams and roi_extents.")
 
+        use_view_time_layout = input_images.dim() == 6
+        full_num_views = 1
+        full_num_times = None
+        if use_view_time_layout:
+            B, full_num_views, full_num_times, C, H, W = input_images.shape
+            input_images = input_images.reshape(B, full_num_views * full_num_times, C, H, W).contiguous()
+            roi_cams = self._flatten_view_time_tensor(roi_cams, full_num_views, full_num_times)
+            roi_extents = self._flatten_view_time_tensor(roi_extents, full_num_views, full_num_times)
+            gt_ego_rot = self._flatten_view_time_tensor(gt_ego_rot, full_num_views, full_num_times)
+            gt_trans = self._flatten_view_time_tensor(gt_trans, full_num_views, full_num_times)
+            gt_pose_valid = self._flatten_view_time_tensor(gt_pose_valid, full_num_views, full_num_times)
+            seed_roi_centers = self._flatten_view_time_tensor(seed_roi_centers, full_num_views, full_num_times)
+            seed_scales = self._flatten_view_time_tensor(seed_scales, full_num_views, full_num_times)
+            external_target_masks = self._flatten_view_time_tensor(
+                external_target_masks, full_num_views, full_num_times
+            )
         B, N, C, H, W = input_images.shape
         h_p, w_p = H // 16, W // 16
 
-        target_ids, has_context_for_target, is_all_target = analyze_target_indices(target_idx, N)
+        if use_view_time_layout:
+            target_time_raw = target_time_idx if target_time_idx is not None else target_idx
+            target_time_ids = self._normalize_index_list(target_time_raw, full_num_times, "target_time_idx")
+            target_ids = self._expand_target_times_to_flat_indices(target_time_ids, full_num_views, full_num_times)
+            has_context_for_target = min(target_time_ids) > 0 if len(target_time_ids) > 0 else False
+            is_all_target = len(target_time_ids) == full_num_times
+        else:
+            target_time_ids = None
+            target_ids, has_context_for_target, is_all_target = analyze_target_indices(target_idx, N)
         target_num = len(target_ids)
-        context_last_idx = max(min(target_ids) - 1, 0)
+        if use_view_time_layout and target_time_ids is not None:
+            context_last_time = max(min(target_time_ids) - 1, 0)
+            context_last_idx = int(context_last_time)
+        else:
+            context_last_idx = max(min(target_ids) - 1, 0)
 
         def _flatten_batch_view_tensor(tensor):
             if tensor is None:
@@ -2997,6 +3140,8 @@ class GDRN(nn.Module):
 
         hidden, _ = self.decode(hidden, N, H, W)  # (B*N, h_p*w_p, C)
         hidden_by_view = hidden.reshape(B, N, h_p * w_p, -1).contiguous()
+        if use_view_time_layout:
+            hidden_by_view = self._apply_same_time_view_fusion(hidden_by_view, full_num_views, full_num_times)
         target_hidden = hidden_by_view[:, target_ids].contiguous()  # (B, T, hw, C)
 
         target_hidden_2d = target_hidden.reshape(B * target_num, h_p, w_p, -1).permute(0, 3, 1, 2).contiguous()

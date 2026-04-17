@@ -461,6 +461,10 @@ class GDRN_DatasetFromList(Base_DatasetFromList):
                 inst_dict["dataset_name"] = dataset_dict["dataset_name"]
                 inst_dict["scene_im_id"] = dataset_dict["scene_im_id"]
                 inst_dict["file_name"] = dataset_dict["file_name"]
+                if "time_id" in dataset_dict:
+                    inst_dict["time_id"] = dataset_dict["time_id"]
+                if "view_id" in dataset_dict:
+                    inst_dict["view_id"] = dataset_dict["view_id"]
                 inst_dict["height"] = im_H
                 inst_dict["width"] = im_W
                 inst_dict["cam"] = dataset_dict["cam"]  # tensor (3, 3)
@@ -996,6 +1000,8 @@ class GDRN_DatasetFromList(Base_DatasetFromList):
             "width",
             "image_id",
             "scene_im_id",
+            "time_id",
+            "view_id",
             "depth_factor",
             "img_type",
         ]:
@@ -1047,7 +1053,7 @@ class GDRN_DatasetFromList(Base_DatasetFromList):
             output["score"] = torch.stack([d["score"] for d in inst_dicts], dim=0).to(device)
 
         # List-type fields: collect into list of lists
-        for key in ["file_name", "scene_im_id", "inst_id", "dataset_name",
+        for key in ["file_name", "scene_im_id", "time_id", "view_id", "inst_id", "dataset_name",
                      "height", "width"]:
             if key in inst_dicts[0]:
                 output[key] = [d[key] for d in inst_dicts]

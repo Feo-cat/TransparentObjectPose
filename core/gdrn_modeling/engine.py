@@ -980,7 +980,13 @@ class GDRN_Lite(LightningLite):
                     torch.cuda.empty_cache()
                 batch_prep_t0 = _phase_begin(profile_this_iter)
                 batch = batch_data_rand_num_perm(cfg, data)
-                num_target_views = batch["roi_img"].shape[1]
+                use_view_time_layout = batch["roi_img"].dim() == 6
+                if use_view_time_layout:
+                    num_times = int(batch["roi_img"].shape[2])
+                    num_target_views = num_times
+                else:
+                    num_times = int(batch["roi_img"].shape[1])
+                    num_target_views = num_times
                 num_context_views = int(cfg.MODEL.CDPN.PNP_NET.get("TRAIN_NUM_CONTEXT_VIEWS", 3))
                 num_target_views_cfg = int(cfg.MODEL.CDPN.PNP_NET.get("TRAIN_NUM_TARGET_VIEWS", 3))
                 context_then_target_prob = float(cfg.MODEL.CDPN.PNP_NET.get("TRAIN_CONTEXT_THEN_TARGET_PROB", 0.5))
@@ -1001,6 +1007,7 @@ class GDRN_Lite(LightningLite):
                         target_idx = [num_target_views - 1]
                 else:
                     target_idx = list(range(0, num_target_views))
+                target_time_idx = target_idx if use_view_time_layout else None
                 _phase_end(profile_this_iter, phase_stats, "batch_prep", batch_prep_t0)
 
                 forward_t0 = _phase_begin(profile_this_iter)
@@ -1031,6 +1038,7 @@ class GDRN_Lite(LightningLite):
                     input_images=batch["input_images"],
                     noisy_obj_masks=batch.get("noisy_obj_masks", None),
                     target_idx=target_idx,
+                    target_time_idx=target_time_idx,
                     do_loss=True,
                     **vi_model_kwargs,
                 )

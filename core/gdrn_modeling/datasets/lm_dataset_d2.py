@@ -3,6 +3,7 @@ import logging
 import os
 import os.path as osp
 import sys
+import glob
 
 cur_dir = osp.dirname(osp.abspath(__file__))
 PROJ_ROOT = osp.normpath(osp.join(cur_dir, "../../.."))
@@ -113,22 +114,56 @@ class LM_Dataset(object):
             gt_dict = mmcv.load(osp.join(scene_root, "scene_gt.json"))
             gt_info_dict = mmcv.load(osp.join(scene_root, "scene_gt_info.json"))  # bbox_obj, bbox_visib
             cam_dict = mmcv.load(osp.join(scene_root, "scene_camera.json"))
+            processed_group_ids = set()
+            def _frame_token_sort_key(token):
+                parts = str(token).split("_")
+                key = []
+                for part in parts:
+                    try:
+                        key.append(int(part))
+                    except Exception:
+                        key.append(part)
+                return tuple(key)
+
             for im_id in tqdm(indices):
                 record_list = []
-                for i in range(self.scene_frame_num):
-                    folder_idx, file_idx = im_id.split("_") # here file_idx only one value, but we need to loop over it
-                    folder_idx = int(folder_idx)
-                    # file_idx = int(file_idx)
-                    file_idx = i
-                    curr_im_id = f"{folder_idx:06d}_{file_idx:06d}"
-    
-                    rgb_path = osp.join(scene_root, "rgb/{:06d}/{:06d}.png").format(folder_idx, file_idx)
+                folder_token = str(im_id).split("_")[0]
+                folder_idx = int(folder_token)
+                if folder_idx in processed_group_ids:
+                    continue
+                processed_group_ids.add(folder_idx)
+
+                rgb_dir = osp.join(scene_root, "rgb", f"{folder_idx:06d}")
+                assert osp.isdir(rgb_dir), rgb_dir
+                rgb_files = sorted(glob.glob(osp.join(rgb_dir, "*.png")))
+                assert len(rgb_files) > 0, rgb_dir
+
+                frame_tokens_all = [osp.splitext(osp.basename(p))[0] for p in rgb_files]
+                frame_tokens_all = sorted(frame_tokens_all, key=_frame_token_sort_key)
+                if self.scene_frame_num > 0 and len(frame_tokens_all) >= self.scene_frame_num:
+                    frame_tokens = frame_tokens_all[: self.scene_frame_num]
+                else:
+                    frame_tokens = frame_tokens_all
+
+                for frame_i, frame_token in enumerate(frame_tokens):
+                    curr_im_id = f"{folder_idx:06d}_{frame_token}"
+                    frame_parts = frame_token.split("_")
+                    if len(frame_parts) >= 2:
+                        time_id = int(frame_parts[0])
+                        view_id = int(frame_parts[1])
+                    else:
+                        time_id = int(frame_parts[0])
+                        view_id = int(frame_i)
+
+                    rgb_path = osp.join(scene_root, "rgb", f"{folder_idx:06d}", f"{frame_token}.png")
                     assert osp.exists(rgb_path), rgb_path
-    
-                    depth_path = osp.join(scene_root, "depth/{:06d}/{:06d}.png".format(folder_idx, file_idx))
-    
+
+                    depth_path = osp.join(scene_root, "depth", f"{folder_idx:06d}", f"{frame_token}.npy")
+                    if not osp.exists(depth_path):
+                        depth_path = osp.join(scene_root, "depth", f"{folder_idx:06d}", f"{frame_token}.png")
+
                     scene_id = int(rgb_path.split("/")[-4])
-                    scene_im_id = f"{scene_id}/{folder_idx:06d}_{file_idx:06d}"
+                    scene_im_id = f"{scene_id}/{curr_im_id}"
     
                     if self.debug_im_id is not None:
                         if self.debug_im_id != scene_im_id:
@@ -147,6 +182,8 @@ class LM_Dataset(object):
                         "width": self.width,
                         "image_id": curr_im_id,
                         "scene_im_id": scene_im_id,  # for evaluation
+                        "time_id": time_id,
+                        "view_id": view_id,
                         "cam": K,
                         "depth_factor": depth_factor,
                         "img_type": "real",
@@ -178,8 +215,8 @@ class LM_Dataset(object):
                                 self.num_instances_without_valid_box += 1
                                 continue
     
-                        mask_file = osp.join(scene_root, f"mask/{folder_idx:06d}/{file_idx:06d}_{anno_i:06d}.png")
-                        mask_visib_file = osp.join(scene_root, f"mask_visib/{folder_idx:06d}/{file_idx:06d}_{anno_i:06d}.png")
+                        mask_file = osp.join(scene_root, f"mask/{folder_idx:06d}/{frame_token}_{anno_i:06d}.png")
+                        mask_visib_file = osp.join(scene_root, f"mask_visib/{folder_idx:06d}/{frame_token}_{anno_i:06d}.png")
                         assert osp.exists(mask_file), mask_file
                         assert osp.exists(mask_visib_file), mask_visib_file
                         # load mask visib  TODO: load both mask_visib and mask_full
@@ -208,7 +245,7 @@ class LM_Dataset(object):
                             "mask_full_file": mask_file,  # TODO: load as mask_full, rle
                         }
                         if "test" not in self.name:
-                            xyz_path = osp.join(xyz_root, f"{folder_idx:06d}/{file_idx:06d}_{anno_i:06d}.pkl")
+                            xyz_path = osp.join(xyz_root, f"{folder_idx:06d}/{frame_token}_{anno_i:06d}.pkl")
                             assert osp.exists(xyz_path), xyz_path
                             inst["xyz_path"] = xyz_path
     

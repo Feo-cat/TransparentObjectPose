@@ -78,11 +78,12 @@ export GDRN_CKPT_OSS_DIR="s3://019CE739817A7E43855626E278830CD7:019CE739817A7E35
 export GDRN_ADS_CLI_DIR="/mnt/afs/afs"
 export GDRN_ADS_CLI_BIN="${GDRN_ADS_CLI_BIN:-${GDRN_ADS_CLI_DIR}/ads-cli}"
 export GDRN_CKPT_SYNC_CMD="${GDRN_ADS_CLI_BIN} --threads=32 cp {local_path} {remote_dir}/"
+NUM_SPATIAL_VIEWS="${NUM_SPATIAL_VIEWS:-1}"
 
 
 # CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4   core/gdrn_modeling/main_gdrn.py   --config-file configs/gdrn/labsim/a6_cPnP_lm13.py   --num-gpus 4 --strategy ddp
 
 # CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1   core/gdrn_modeling/main_gdrn.py   --config-file configs/gdrn/labsim/a6_cPnP_lm13_ctx_prior.py   --num-gpus 1 --strategy ddp
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2   core/gdrn_modeling/main_gdrn.py   --config-file configs/gdrn/labsim/a6_cPnP_lm13_ctx_prior.py   --num-gpus 2 --strategy ddp
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2   core/gdrn_modeling/main_gdrn.py   --config-file configs/gdrn/labsim/a6_cPnP_lm13_ctx_prior.py   --num-gpus 2 --strategy ddp MODEL.CDPN.PNP_NET.TRAIN_NUM_SPATIAL_VIEWS "${NUM_SPATIAL_VIEWS}"
 # CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node=4   core/gdrn_modeling/main_gdrn.py   --config-file configs/gdrn/labsim/a6_cPnP_lm13_ctx_prior.py   --num-gpus 4 --strategy ddp
 # CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --standalone --nproc_per_node=8   core/gdrn_modeling/main_gdrn.py   --config-file configs/gdrn/labsim/a6_cPnP_lm13_ctx_prior.py   --num-gpus 8 --strategy ddp
